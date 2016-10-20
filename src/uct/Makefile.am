@@ -56,7 +56,8 @@ libuct_la_SOURCES += \
 	
 noinst_HEADERS += \
 	ib/mlx5/ib_mlx5_log.h \
-	ib/mlx5/ib_mlx5.h
+	ib/mlx5/ib_mlx5.h \
+	ib/mlx5/ib_mlx5.inl
 endif
 
 
@@ -123,9 +124,11 @@ noinst_HEADERS += \
 
 if HAVE_MLX5_HW
 noinst_HEADERS += \
+	ib/ud/accel/ud_mlx5_common.h \
 	ib/ud/accel/ud_mlx5.h
 
 libuct_la_SOURCES += \
+	ib/ud/accel/ud_mlx5_common.c \
 	ib/ud/accel/ud_mlx5.c 
 endif
 endif

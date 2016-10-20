@@ -21,7 +21,13 @@ static ucs_status_t uct_knem_iface_query(uct_iface_h tl_iface,
 
     /* default values for all shared memory transports */
     iface_attr->cap.put.max_zcopy      = SIZE_MAX;
+    iface_attr->cap.put.max_iov        = uct_sm_get_max_iov();
+
     iface_attr->cap.get.max_zcopy      = SIZE_MAX;
+    iface_attr->cap.get.max_iov        = uct_sm_get_max_iov();
+
+    iface_attr->cap.am.max_iov         = 1;
+
     iface_attr->iface_addr_len         = 0;
     iface_attr->device_addr_len        = UCT_SM_IFACE_DEVICE_ADDR_LEN;
     iface_attr->ep_addr_len            = 0;
@@ -51,12 +57,14 @@ static uct_iface_ops_t uct_knem_iface_ops = {
 };
 
 static UCS_CLASS_INIT_FUNC(uct_knem_iface_t, uct_md_h md, uct_worker_h worker,
-                           const char *dev_name, size_t rx_headroom,
+                           const uct_iface_params_t *params,
                            const uct_iface_config_t *tl_config)
 {
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_knem_iface_ops, md, worker,
                               tl_config UCS_STATS_ARG(NULL));
     self->knem_md = (uct_knem_md_t *)md;
+    uct_sm_get_max_iov(); /* to initialize ucs_get_max_iov static variable */
+
     return UCS_OK;
 }
 
@@ -68,7 +76,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_knem_iface_t)
 UCS_CLASS_DEFINE(uct_knem_iface_t, uct_base_iface_t);
 
 static UCS_CLASS_DEFINE_NEW_FUNC(uct_knem_iface_t, uct_iface_t, uct_md_h,
-                                 uct_worker_h, const char *, size_t,
+                                 uct_worker_h, const uct_iface_params_t*,
                                  const uct_iface_config_t *);
 static UCS_CLASS_DEFINE_DELETE_FUNC(uct_knem_iface_t, uct_iface_t);
 

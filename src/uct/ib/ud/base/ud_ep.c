@@ -156,12 +156,15 @@ UCS_CLASS_INIT_FUNC(uct_ud_ep_t, uct_ud_iface_t *iface)
     ucs_arbiter_group_init(&self->tx.pending.group);
     ucs_arbiter_elem_init(&self->tx.pending.elem);
 
+    self->path_bits = iface->super.path_bits[0]; /* TODO multi-rail */
+
     uct_worker_progress_register(iface->super.super.worker,
                                  ucs_derived_of(iface->super.ops, uct_ud_iface_ops_t)->progress,
                                  iface);
 
     UCT_UD_EP_HOOK_INIT(self);
-    ucs_debug("NEW EP: iface=%p ep=%p id=%d", iface, self, self->ep_id);
+    ucs_debug("NEW EP: iface=%p ep=%p id=%d src_path_bits=%d",
+              iface, self, self->ep_id, self->path_bits);
     return UCS_OK;
 }
 
@@ -775,6 +778,7 @@ static uct_ud_send_skb_t *uct_ud_ep_resend(uct_ud_ep_t *ep)
     uct_ud_iface_t *iface = ucs_derived_of(ep->super.super.iface, uct_ud_iface_t);
     uct_ud_send_skb_t *skb, *sent_skb;
     uct_ud_zcopy_desc_t *zdesc;
+    size_t iov_it;
 
     /* check window */
     sent_skb = ucs_queue_iter_elem(sent_skb, ep->resend.pos, queue);
@@ -809,8 +813,13 @@ static uct_ud_send_skb_t *uct_ud_ep_resend(uct_ud_ep_t *ep)
     skb->len           = sent_skb->len;
     if (sent_skb->flags & UCT_UD_SEND_SKB_FLAG_ZCOPY) {
         zdesc = uct_ud_zcopy_desc(sent_skb);
-        memcpy((char *)skb->neth + skb->len, zdesc->payload, zdesc->len);
-        skb->len += zdesc->len;
+        for (iov_it = 0; iov_it < zdesc->iovcnt; ++iov_it) {
+            if (zdesc->iov[iov_it].length > 0) {
+                memcpy((char *)skb->neth + skb->len, zdesc->iov[iov_it].buffer,
+                       zdesc->iov[iov_it].length);
+                skb->len += zdesc->iov[iov_it].length;
+            }
+        }
     }
     /* force ack request on every Nth packet or on first packet in resend window */
     if ((skb->neth->psn % UCT_UD_RESENDS_PER_ACK) == 0 || 

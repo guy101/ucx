@@ -8,10 +8,12 @@
 #ifndef UCS_AARCH64_CPU_H_
 #define UCS_AARCH64_CPU_H_
 
-#include <ucs/debug/log.h>
 #include <time.h>
 #include <sys/times.h>
 #include <ucs/arch/generic/cpu.h>
+#if __ARM_NEON
+#include <arm_neon.h>
+#endif
 
 
 #define UCS_ARCH_CACHE_LINE_SIZE 64
