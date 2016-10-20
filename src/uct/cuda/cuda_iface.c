@@ -53,14 +53,17 @@ static ucs_status_t uct_cuda_iface_query(uct_iface_h iface,
     iface_attr->cap.put.max_short      = 0;
     iface_attr->cap.put.max_bcopy      = 0;
     iface_attr->cap.put.max_zcopy      = 0;
+    iface_attr->cap.put.max_iov        = 1;
 
     iface_attr->cap.get.max_bcopy      = 0;
     iface_attr->cap.get.max_zcopy      = 0;
+    iface_attr->cap.get.max_iov        = 1;
 
     iface_attr->cap.am.max_short       = 0;
     iface_attr->cap.am.max_bcopy       = 0;
     iface_attr->cap.am.max_zcopy       = 0;
     iface_attr->cap.am.max_hdr         = 0;
+    iface_attr->cap.am.max_iov         = 1;
 
     iface_attr->latency                = 1e-9;
     iface_attr->bandwidth              = 6911 * 1024.0 * 1024.0;
@@ -83,14 +86,14 @@ static uct_iface_ops_t uct_cuda_iface_ops = {
 };
 
 static UCS_CLASS_INIT_FUNC(uct_cuda_iface_t, uct_md_h md, uct_worker_h worker,
-                           const char *dev_name, size_t rx_headroom,
+                           const uct_iface_params_t *params,
                            const uct_iface_config_t *tl_config)
 {
     UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_cuda_iface_ops, md, worker,
                               tl_config UCS_STATS_ARG(NULL));
 
-    if (strcmp(dev_name, UCT_CUDA_DEV_NAME) != 0) {
-        ucs_error("No device was found: %s", dev_name);
+    if (strcmp(params->dev_name, UCT_CUDA_DEV_NAME) != 0) {
+        ucs_error("No device was found: %s", params->dev_name);
         return UCS_ERR_NO_DEVICE;
     }
 
@@ -104,7 +107,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_cuda_iface_t)
 
 UCS_CLASS_DEFINE(uct_cuda_iface_t, uct_base_iface_t);
 UCS_CLASS_DEFINE_NEW_FUNC(uct_cuda_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
-                          const char*, size_t, const uct_iface_config_t *);
+                          const uct_iface_params_t*, const uct_iface_config_t*);
 static UCS_CLASS_DEFINE_DELETE_FUNC(uct_cuda_iface_t, uct_iface_t);
 
 

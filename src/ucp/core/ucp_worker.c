@@ -1,5 +1,6 @@
 /**
 * Copyright (C) Mellanox Technologies Ltd. 2001-2015.  ALL RIGHTS RESERVED.
+* Copyright (C) ARM Ltd. 2016.  ALL RIGHTS RESERVED.
 *
 * See file LICENSE for terms.
 */
@@ -178,6 +179,7 @@ static ucs_status_t ucp_worker_add_iface(ucp_worker_h worker,
     ucs_status_t status;
     uct_iface_h iface;
     uct_iface_attr_t *attr;
+    uct_iface_params_t iface_params;
     uct_wakeup_h wakeup = NULL;
 
     /* Read configuration
@@ -188,10 +190,13 @@ static ucs_status_t ucp_worker_add_iface(ucp_worker_h worker,
         goto out;
     }
 
+    iface_params.tl_name     = resource->tl_rsc.tl_name;
+    iface_params.dev_name    = resource->tl_rsc.dev_name;
+    iface_params.rx_headroom = sizeof(ucp_recv_desc_t);
+
     /* Open UCT interface */
     status = uct_iface_open(context->mds[resource->md_index], worker->uct,
-                            resource->tl_rsc.tl_name, resource->tl_rsc.dev_name,
-                            sizeof(ucp_recv_desc_t), iface_config, &iface);
+                            &iface_params, iface_config, &iface);
     uct_config_release(iface_config);
 
     if (status != UCS_OK) {
@@ -353,6 +358,23 @@ static void ucp_worker_init_device_atomics(ucp_worker_h worker)
     }
 }
 
+static void ucp_worker_init_guess_atomics(ucp_worker_h worker)
+{
+    ucp_context_h context = worker->context;
+    ucp_rsc_index_t rsc_index;
+    uint64_t accumulated_flags = 0;
+
+    for (rsc_index = 0; rsc_index < context->num_tls; ++rsc_index) {
+        accumulated_flags |= worker->iface_attrs[rsc_index].cap.flags;
+    }
+
+    if (accumulated_flags & UCT_IFACE_FLAG_ATOMIC_DEVICE) {
+	ucp_worker_init_device_atomics(worker);
+    } else {
+	ucp_worker_init_cpu_atomics(worker);
+    }
+}
+
 static void ucp_worker_init_atomic_tls(ucp_worker_h worker)
 {
     ucp_context_h context = worker->context;
@@ -360,10 +382,19 @@ static void ucp_worker_init_atomic_tls(ucp_worker_h worker)
     worker->atomic_tls = 0;
 
     if (context->config.features & (UCP_FEATURE_AMO32|UCP_FEATURE_AMO64)) {
-        if (context->config.ext.atomic_mode == UCP_ATOMIC_MODE_CPU) {
+        switch(context->config.ext.atomic_mode) {
+        case UCP_ATOMIC_MODE_CPU:
             ucp_worker_init_cpu_atomics(worker);
-        } else if (context->config.ext.atomic_mode == UCP_ATOMIC_MODE_DEVICE) {
+            break;
+        case UCP_ATOMIC_MODE_DEVICE:
             ucp_worker_init_device_atomics(worker);
+            break;
+        case UCP_ATOMIC_MODE_GUESS:
+            ucp_worker_init_guess_atomics(worker);
+            break;
+        default:
+            ucs_fatal("unsupported atomic mode: %d",
+                      context->config.ext.atomic_mode);
         }
     }
 }
@@ -404,8 +435,8 @@ out:
     return config_idx;
 }
 
-ucs_status_t ucp_worker_create(ucp_context_h context, ucs_thread_mode_t thread_mode,
-                               ucp_worker_h *worker_p)
+ucs_status_t ucp_worker_create(ucp_context_h context, ucs_worker_param_t *worker_param,
+                               ucs_thread_mode_t thread_mode, ucp_worker_h *worker_p)
 {
     ucp_rsc_index_t tl_id;
     ucp_worker_h worker;
@@ -465,7 +496,7 @@ ucs_status_t ucp_worker_create(ucp_context_h context, ucs_thread_mode_t thread_m
     }
 
     /* Create the underlying UCT worker */
-    status = uct_worker_create(&worker->async, thread_mode, &worker->uct);
+    status = uct_worker_create(&worker->async, worker_param, thread_mode, &worker->uct);
     if (status != UCS_OK) {
         goto err_destroy_async;
     }

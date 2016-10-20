@@ -210,7 +210,7 @@ ucs_status_t uct_md_stub_rkey_unpack(uct_md_component_t *mdc,
 }
 
 static UCS_CLASS_INIT_FUNC(uct_worker_t, ucs_async_context_t *async,
-                           ucs_thread_mode_t thread_mode)
+                           ucs_worker_param_t *param, ucs_thread_mode_t thread_mode)
 {
     self->async       = async;
     self->thread_mode = thread_mode;
@@ -256,7 +256,8 @@ void uct_worker_slowpath_progress_unregister(uct_worker_h worker,
 
 UCS_CLASS_DEFINE(uct_worker_t, void);
 UCS_CLASS_DEFINE_NAMED_NEW_FUNC(uct_worker_create, uct_worker_t, uct_worker_t,
-                                ucs_async_context_t*, ucs_thread_mode_t)
+                                ucs_async_context_t*, ucs_worker_param_t*,
+                                ucs_thread_mode_t)
 UCS_CLASS_DEFINE_NAMED_DELETE_FUNC(uct_worker_destroy, uct_worker_t, uct_worker_t)
 
 
@@ -350,19 +351,20 @@ ucs_status_t uct_iface_config_read(const char *tl_name, const char *env_prefix,
     return UCS_OK;
 }
 
-ucs_status_t uct_iface_open(uct_md_h md, uct_worker_h worker, const char *tl_name,
-                            const char *dev_name, size_t rx_headroom,
-                            const uct_iface_config_t *config, uct_iface_h *iface_p)
+ucs_status_t uct_iface_open(uct_md_h md, uct_worker_h worker,
+                            const uct_iface_params_t *params,
+                            const uct_iface_config_t *config,
+                            uct_iface_h *iface_p)
 {
     uct_tl_component_t *tlc;
 
-    tlc = uct_find_tl_on_md(md->component, tl_name);
+    tlc = uct_find_tl_on_md(md->component, params->tl_name);
     if (tlc == NULL) {
         /* Non-existing transport */
         return UCS_ERR_NO_DEVICE;
     }
 
-    return tlc->iface_open(md, worker, dev_name, rx_headroom, config, iface_p);
+    return tlc->iface_open(md, worker, params, config, iface_p);
 }
 
 static uct_md_component_t *uct_find_mdc(const char *name)

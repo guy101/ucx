@@ -24,7 +24,7 @@ enum {
     UCT_EP_STAT_AM,
     UCT_EP_STAT_PUT,
     UCT_EP_STAT_GET,
-    UCT_EP_STAT_ATOMIC,    
+    UCT_EP_STAT_ATOMIC,
     UCT_EP_STAT_BYTES_SHORT,
     UCT_EP_STAT_BYTES_BCOPY,
     UCT_EP_STAT_BYTES_ZCOPY,
@@ -59,9 +59,9 @@ enum {
 #define UCT_TL_EP_STAT_ATOMIC(_ep) \
     UCS_STATS_UPDATE_COUNTER((_ep)->stats, UCT_EP_STAT_ATOMIC, 1);
 #define UCT_TL_EP_STAT_FLUSH(_ep) \
-    UCS_STATS_UPDATE_COUNTER((_ep)->stats, UCT_EP_STAT_FLUSH, 1); 
+    UCS_STATS_UPDATE_COUNTER((_ep)->stats, UCT_EP_STAT_FLUSH, 1);
 #define UCT_TL_EP_STAT_FLUSH_WAIT(_ep) \
-    UCS_STATS_UPDATE_COUNTER((_ep)->stats, UCT_EP_STAT_FLUSH_WAIT, 1); 
+    UCS_STATS_UPDATE_COUNTER((_ep)->stats, UCT_EP_STAT_FLUSH_WAIT, 1);
 #define UCT_TL_EP_STAT_FENCE(_ep) \
     UCS_STATS_UPDATE_COUNTER((_ep)->stats, UCT_EP_STAT_FENCE, 1);
 
@@ -87,6 +87,25 @@ enum {
         ucs_error(_err_message, ## __VA_ARGS__); \
         return UCS_ERR_INVALID_PARAM; \
     }
+
+
+/**
+ * Check the size of the IOV array
+ */
+#define UCT_CHECK_IOV_SIZE(_iovcnt, _max_iov, _name) \
+    UCT_CHECK_PARAM((_iovcnt) <= (_max_iov), \
+                    "iovcnt(%lu) should be limited by %lu in %s", \
+                    _iovcnt, _max_iov, _name)
+
+
+/**
+ * This macro should be deleted after UCT gather/scatter IOV interface changed
+ */
+#define UCT_CHECK_PARAM_IOV(_iov, _iovcnt, _buffer, _length, _memh) \
+    UCT_CHECK_PARAM(1 == _iovcnt, "iov[iovcnt] has to be 1 at this time"); \
+    void     *_buffer = _iov[0].buffer; \
+    size_t    _length = _iov[0].length; \
+    uct_mem_h _memh   = _iov[0].memh;
 
 
 /**
@@ -198,7 +217,7 @@ typedef struct uct_tl_component {
                                               unsigned *num_resources_p);
 
     ucs_status_t           (*iface_open)(uct_md_h md, uct_worker_h worker,
-                                         const char *dev_name, size_t rx_headroom,
+                                         const uct_iface_params_t *params,
                                          const uct_iface_config_t *config,
                                          uct_iface_h *iface_p);
 
@@ -434,7 +453,7 @@ extern ucs_config_field_t uct_iface_config_table[];
  */
 ucs_status_t uct_iface_mpool_init(uct_base_iface_t *iface, ucs_mpool_t *mp,
                                   size_t elem_size, size_t align_offset, size_t alignment,
-                                  uct_iface_mpool_config_t *config, unsigned grow,
+                                  const uct_iface_mpool_config_t *config, unsigned grow,
                                   uct_iface_mpool_init_obj_cb_t init_obj_cb,
                                   const char *name);
 
@@ -482,6 +501,32 @@ void uct_invoke_completion(uct_completion_t *comp, ucs_status_t status)
     if (--comp->count == 0) {
         comp->func(comp, status);
     }
+}
+
+/**
+ * Calculates total length of particular iov data buffer.
+ * Currently has no support for stride.
+ * If stride supported it should be like: length + ((count - 1) * stride)
+ */
+static UCS_F_ALWAYS_INLINE
+size_t uct_iov_get_length(const uct_iov_t *iov)
+{
+    return iov->count * iov->length;
+}
+
+/**
+ * Calculates total length of the iov array buffers.
+ */
+static UCS_F_ALWAYS_INLINE
+size_t uct_iov_total_length(const uct_iov_t *iov, size_t iovcnt)
+{
+    size_t iov_it, total_length = 0;
+
+    for (iov_it = 0; iov_it < iovcnt; ++iov_it) {
+        total_length += uct_iov_get_length(&iov[iov_it]);
+    }
+
+    return total_length;
 }
 
 

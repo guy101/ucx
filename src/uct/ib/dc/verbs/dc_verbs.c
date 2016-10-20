@@ -17,6 +17,18 @@
 #include <string.h>
 
 
+static ucs_config_field_t uct_dc_verbs_iface_config_table[] = {
+  {"DC_", "", NULL,
+   ucs_offsetof(uct_dc_verbs_iface_config_t, super),
+   UCS_CONFIG_TYPE_TABLE(uct_dc_iface_config_table)},
+
+  {"", "", NULL,
+   ucs_offsetof(uct_dc_verbs_iface_config_t, verbs_common),
+   UCS_CONFIG_TYPE_TABLE(uct_rc_verbs_iface_common_config_table)},
+
+  {NULL}
+};
+
 static UCS_CLASS_INIT_FUNC(uct_dc_verbs_ep_t,
                            uct_iface_t *tl_iface,
                            const uct_device_addr_t *dev_addr,
@@ -26,11 +38,14 @@ static UCS_CLASS_INIT_FUNC(uct_dc_verbs_ep_t,
     const uct_ib_address_t *ib_addr = (const uct_ib_address_t *)dev_addr;
     const uct_dc_iface_addr_t *if_addr = (const uct_dc_iface_addr_t *)iface_addr;
     ucs_status_t status;
+    int is_global;
 
     ucs_trace_func("");
     UCS_CLASS_CALL_SUPER_INIT(uct_dc_ep_t, &iface->super, if_addr);
 
-    status = uct_ib_iface_create_ah(&iface->super.super.super, ib_addr, 0, &self->ah);
+    status = uct_ib_iface_create_ah(&iface->super.super.super, ib_addr,
+                                    iface->super.super.super.path_bits[0], &self->ah,
+                                    &is_global);
     if (status != UCS_OK) {
         return UCS_ERR_INVALID_ADDR;
     }
@@ -57,7 +72,7 @@ static ucs_status_t uct_dc_verbs_iface_query(uct_iface_h tl_iface, uct_iface_att
     uct_dc_verbs_iface_t *iface = ucs_derived_of(tl_iface, uct_dc_verbs_iface_t);
 
     uct_dc_iface_query(&iface->super, iface_attr);
-    uct_rc_verbs_iface_common_query(&iface->verbs_common, 
+    uct_rc_verbs_iface_common_query(&iface->verbs_common,
                                     &iface->super.super, iface_attr);
     /*TODO: remove flags once we have a full functionality */
     iface_attr->cap.flags           = UCT_IFACE_FLAG_AM_ZCOPY|
@@ -102,7 +117,7 @@ uct_dc_verbs_iface_post_send(uct_dc_verbs_iface_t* iface, uct_dc_verbs_ep_t *ep,
     wr->wr_id             = txqp->unsignaled;
     wr->dc.ah             = ep->ah;
     wr->dc.dct_number     = ep->dest_qpn;
-    wr->dc.dct_access_key = UCT_IB_DC_KEY;
+    wr->dc.dct_access_key = UCT_IB_KEY;
 
     uct_ib_log_exp_post_send(&iface->super.super.super, txqp->qp, wr,
                              (wr->exp_opcode == (int)IBV_WR_SEND) ? uct_rc_ep_am_packet_dump : NULL);
@@ -114,19 +129,19 @@ uct_dc_verbs_iface_post_send(uct_dc_verbs_iface_t* iface, uct_dc_verbs_ep_t *ep,
         ucs_fatal("ibv_post_send() returned %d (%m)", ret);
     }
 
-    uct_rc_verbs_txqp_posted(txqp, &iface->dcis_txcnt[dci], 
+    uct_rc_verbs_txqp_posted(txqp, &iface->dcis_txcnt[dci],
                              &iface->super.super, send_flags & IBV_SEND_SIGNALED);
 }
 
 static UCS_F_ALWAYS_INLINE void
-uct_dc_verbs_iface_post_send_desc(uct_dc_verbs_iface_t *iface, 
-                                  uct_dc_verbs_ep_t *ep, 
+uct_dc_verbs_iface_post_send_desc(uct_dc_verbs_iface_t *iface,
+                                  uct_dc_verbs_ep_t *ep,
                                   struct ibv_exp_send_wr *wr,
                                   uct_rc_iface_send_desc_t *desc, uint64_t send_flags)
 {
     UCT_RC_VERBS_FILL_DESC_WR(wr, desc);
     uct_dc_verbs_iface_post_send(iface, ep, wr, send_flags);
-    uct_rc_txqp_add_send_op_sn(&iface->super.tx.dcis[ep->super.dci].txqp, &desc->super, 
+    uct_rc_txqp_add_send_op_sn(&iface->super.tx.dcis[ep->super.dci].txqp, &desc->super,
                                iface->dcis_txcnt[ep->super.dci].pi);
 }
 
@@ -140,22 +155,23 @@ static inline void uct_dc_verbs_iface_add_send_comp(uct_dc_verbs_iface_t *iface,
 }
 
 static inline ucs_status_t
-uct_dc_verbs_ep_rdma_zcopy(uct_dc_verbs_ep_t *ep, const void *buffer, size_t length,
-                           uct_ib_mem_t *memh, uint64_t remote_addr,
-                           uct_rkey_t rkey, uct_completion_t *comp,
-                           int opcode)
+uct_dc_verbs_ep_rdma_zcopy(uct_dc_verbs_ep_t *ep, const uct_iov_t *iov,
+                           size_t iovcnt, uint64_t remote_addr, uct_rkey_t rkey,
+                           uct_completion_t *comp, int opcode)
 {
     uct_dc_verbs_iface_t *iface = ucs_derived_of(ep->super.super.super.iface,
                                                  uct_dc_verbs_iface_t);
     struct ibv_exp_send_wr wr;
-    struct ibv_sge sge;
-
-    UCT_SKIP_ZERO_LENGTH(length);
+    struct ibv_sge sge[UCT_IB_MAX_IOV];
+    size_t sge_cnt;
 
     UCT_DC_CHECK_RES(&iface->super, &ep->super);
-    UCT_RC_VERBS_FILL_RDMA_WR(wr, wr.exp_opcode, opcode, sge, length, remote_addr, rkey);
+
+    sge_cnt = uct_ib_verbs_sge_fill_iov(sge, iov, iovcnt);
+    UCT_SKIP_ZERO_LENGTH(sge_cnt);
+    UCT_RC_VERBS_FILL_RDMA_WR_IOV(wr, wr.exp_opcode, opcode, sge, sge_cnt,
+                                  remote_addr, rkey);
     wr.next = NULL;
-    uct_rc_verbs_rdma_zcopy_sge_fill(&sge, buffer, length, memh);
 
     uct_dc_verbs_iface_post_send(iface, ep, &wr, IBV_SEND_SIGNALED);
     uct_dc_verbs_iface_add_send_comp(iface, ep, comp);
@@ -177,7 +193,7 @@ ucs_status_t uct_dc_verbs_ep_get_bcopy(uct_ep_h tl_ep,
 
     UCT_CHECK_LENGTH(length, iface->super.super.super.config.seg_size, "get_bcopy");
     UCT_DC_CHECK_RES(&iface->super, &ep->super);
-    UCT_RC_IFACE_GET_TX_GET_BCOPY_DESC(&iface->super.super, &iface->super.super.tx.mp, 
+    UCT_RC_IFACE_GET_TX_GET_BCOPY_DESC(&iface->super.super, &iface->super.super.tx.mp,
                                        desc, unpack_cb, comp, arg, length);
     UCT_RC_VERBS_FILL_RDMA_WR(wr, wr.exp_opcode, IBV_WR_RDMA_READ, sge, length, remote_addr,
                               rkey);
@@ -187,18 +203,24 @@ ucs_status_t uct_dc_verbs_ep_get_bcopy(uct_ep_h tl_ep,
     return UCS_INPROGRESS;
 }
 
-ucs_status_t uct_dc_verbs_ep_get_zcopy(uct_ep_h tl_ep, void *buffer, size_t length,
-                                       uct_mem_h memh, uint64_t remote_addr,
-                                       uct_rkey_t rkey, uct_completion_t *comp)
+ucs_status_t uct_dc_verbs_ep_get_zcopy(uct_ep_h tl_ep, const uct_iov_t *iov, size_t iovcnt,
+                                       uint64_t remote_addr, uct_rkey_t rkey,
+                                       uct_completion_t *comp)
 {
-    uct_dc_verbs_ep_t *ep = ucs_derived_of(tl_ep, uct_dc_verbs_ep_t);
+    uct_dc_verbs_ep_t *ep  = ucs_derived_of(tl_ep, uct_dc_verbs_ep_t);
+    uct_ib_iface_t  *iface = ucs_derived_of(tl_ep->iface, uct_ib_iface_t);
     ucs_status_t status;
 
-    UCT_CHECK_LENGTH(length, UCT_IB_MAX_MESSAGE_SIZE, "get_zcopy");
-    status = uct_dc_verbs_ep_rdma_zcopy(ep, buffer, length, memh, remote_addr,
-                                        rkey, comp, IBV_WR_RDMA_READ);
+    UCT_CHECK_IOV_SIZE(iovcnt, uct_ib_iface_get_max_iov(iface),
+                       "uct_dc_verbs_ep_get_zcopy");
+    UCT_CHECK_LENGTH(uct_iov_total_length(iov, iovcnt), UCT_IB_MAX_MESSAGE_SIZE,
+                     "get_zcopy");
+
+    status = uct_dc_verbs_ep_rdma_zcopy(ep, iov, iovcnt, remote_addr, rkey, comp,
+                                        IBV_WR_RDMA_READ);
     if (status == UCS_INPROGRESS) {
-        UCT_TL_EP_STAT_OP(&ep->super.super, GET, ZCOPY, length);
+        UCT_TL_EP_STAT_OP(&ep->super.super, GET, ZCOPY,
+                          uct_iov_total_length(iov, iovcnt));
     }
     return status;
 }
@@ -215,7 +237,7 @@ ucs_status_t uct_dc_verbs_ep_put_short(uct_ep_h tl_ep, const void *buffer,
     UCT_DC_CHECK_RES(&iface->super, &ep->super);
     UCT_RC_VERBS_FILL_INL_PUT_WR(iface, remote_addr, rkey, buffer, length);
     UCT_TL_EP_STAT_OP(&ep->super.super, PUT, SHORT, length);
-    uct_dc_verbs_iface_post_send(iface, ep, &iface->inl_rwrite_wr, 
+    uct_dc_verbs_iface_post_send(iface, ep, &iface->inl_rwrite_wr,
                                  IBV_SEND_INLINE|IBV_SEND_SIGNALED);
 
     return UCS_OK;
@@ -234,7 +256,7 @@ ssize_t uct_dc_verbs_ep_put_bcopy(uct_ep_h tl_ep, uct_pack_callback_t pack_cb,
     UCT_DC_CHECK_RES(&iface->super, &ep->super);
     UCT_RC_IFACE_GET_TX_PUT_BCOPY_DESC(&iface->super.super, &iface->super.super.tx.mp,
                                        desc, pack_cb, arg, length);
-    UCT_RC_VERBS_FILL_RDMA_WR(wr, wr.exp_opcode, IBV_WR_RDMA_WRITE, sge, 
+    UCT_RC_VERBS_FILL_RDMA_WR(wr, wr.exp_opcode, IBV_WR_RDMA_WRITE, sge,
                               length, remote_addr, rkey);
     UCT_TL_EP_STAT_OP(&ep->super.super, PUT, BCOPY, length);
     uct_dc_verbs_iface_post_send_desc(iface, ep, &wr, desc, IBV_SEND_SIGNALED);
@@ -242,17 +264,23 @@ ssize_t uct_dc_verbs_ep_put_bcopy(uct_ep_h tl_ep, uct_pack_callback_t pack_cb,
     return length;
 }
 
-ucs_status_t uct_dc_verbs_ep_put_zcopy(uct_ep_h tl_ep, const void *buffer, size_t length,
-                                       uct_mem_h memh, uint64_t remote_addr,
-                                       uct_rkey_t rkey, uct_completion_t *comp)
+ucs_status_t uct_dc_verbs_ep_put_zcopy(uct_ep_h tl_ep, const uct_iov_t *iov, size_t iovcnt,
+                                       uint64_t remote_addr, uct_rkey_t rkey,
+                                       uct_completion_t *comp)
 {
-    uct_dc_verbs_ep_t *ep = ucs_derived_of(tl_ep, uct_dc_verbs_ep_t);
+    uct_dc_verbs_ep_t *ep  = ucs_derived_of(tl_ep, uct_dc_verbs_ep_t);
+    uct_ib_iface_t  *iface = ucs_derived_of(tl_ep->iface, uct_ib_iface_t);
     ucs_status_t status;
 
-    UCT_CHECK_LENGTH(length, UCT_IB_MAX_MESSAGE_SIZE, "put_zcopy");
-    status = uct_dc_verbs_ep_rdma_zcopy(ep, buffer, length, memh, remote_addr,
-                                        rkey, comp, IBV_WR_RDMA_WRITE);
-    UCT_TL_EP_STAT_OP_IF_SUCCESS(status, &ep->super.super, PUT, ZCOPY, length);
+    UCT_CHECK_IOV_SIZE(iovcnt, uct_ib_iface_get_max_iov(iface),
+                       "uct_dc_verbs_ep_put_zcopy");
+    UCT_CHECK_LENGTH(uct_iov_total_length(iov, iovcnt), UCT_IB_MAX_MESSAGE_SIZE,
+                     "put_zcopy");
+
+    status = uct_dc_verbs_ep_rdma_zcopy(ep, iov, iovcnt, remote_addr, rkey, comp,
+                                        IBV_WR_RDMA_WRITE);
+    UCT_TL_EP_STAT_OP_IF_SUCCESS(status, &ep->super.super, PUT, ZCOPY,
+                                 uct_iov_total_length(iov, iovcnt));
     return status;
 }
 
@@ -297,27 +325,32 @@ ssize_t uct_dc_verbs_ep_am_bcopy(uct_ep_h tl_ep, uint8_t id,
 
 
 ucs_status_t uct_dc_verbs_ep_am_zcopy(uct_ep_h tl_ep, uint8_t id, const void *header,
-                                      unsigned header_length, const void *payload,
-                                      size_t length, uct_mem_h memh,
-                                      uct_completion_t *comp)
+                                      unsigned header_length, const uct_iov_t *iov,
+                                      size_t iovcnt, uct_completion_t *comp)
 {
     uct_dc_verbs_iface_t *iface = ucs_derived_of(tl_ep->iface, uct_dc_verbs_iface_t);
-    uct_dc_verbs_ep_t *ep = ucs_derived_of(tl_ep, uct_dc_verbs_ep_t);
+    uct_dc_verbs_ep_t *ep       = ucs_derived_of(tl_ep, uct_dc_verbs_ep_t);
     uct_rc_iface_send_desc_t *desc;
     struct ibv_exp_send_wr wr;
-    struct ibv_sge sge[2];
+    struct ibv_sge sge[UCT_IB_MAX_IOV]; /* The first sge is reserved for the header */
     int send_flags;
+    size_t sge_cnt;
 
-    UCT_RC_CHECK_AM_ZCOPY(id, header_length, length, 
+    UCT_CHECK_IOV_SIZE(iovcnt,
+                       uct_ib_iface_get_max_iov(&iface->super.super.super) - 1,
+                       "uct_dc_verbs_ep_am_zcopy");
+    UCT_RC_CHECK_AM_ZCOPY(id, header_length, uct_iov_total_length(iov, iovcnt),
                           iface->verbs_common.config.short_desc_size,
                           iface->super.super.super.config.seg_size);
-
     UCT_DC_CHECK_RES(&iface->super, &ep->super);
-    UCT_RC_IFACE_GET_TX_AM_ZCOPY_DESC(&iface->super.super, &iface->verbs_common.short_desc_mp, desc, 
-                                      id, header, header_length, comp, &send_flags);
-    uct_rc_verbs_am_zcopy_sge_fill(sge, header_length, payload, length, memh);
-    UCT_RC_VERBS_FILL_AM_ZCOPY_WR(wr, sge, wr.exp_opcode);
-    UCT_TL_EP_STAT_OP(&ep->super.super, AM, ZCOPY, header_length + length);
+    UCT_RC_IFACE_GET_TX_AM_ZCOPY_DESC(&iface->super.super, &iface->verbs_common.short_desc_mp,
+                                      desc, id, header, header_length, comp, &send_flags);
+
+    sge[0].length = sizeof(uct_rc_hdr_t) + header_length;
+    sge_cnt = uct_ib_verbs_sge_fill_iov(sge + 1, iov, iovcnt);
+    UCT_RC_VERBS_FILL_AM_ZCOPY_WR_IOV(wr, sge, sge_cnt + 1, wr.exp_opcode);
+    UCT_TL_EP_STAT_OP(&ep->super.super, AM, ZCOPY,
+                      header_length + uct_iov_total_length(iov, iovcnt));
     uct_dc_verbs_iface_post_send_desc(iface, ep, &wr, desc, send_flags);
 
     return UCS_INPROGRESS;
@@ -361,7 +394,7 @@ uct_dc_verbs_ep_atomic(uct_dc_verbs_ep_t *ep, int opcode, void *result,
 static UCS_F_ALWAYS_INLINE void
 uct_dc_verbs_iface_ext_atomic_post(uct_dc_verbs_iface_t *iface, uct_dc_verbs_ep_t *ep,
                                    int opcode, uint32_t length, uint32_t compare_mask,
-                                   uint64_t compare_add, uint64_t swap, uint64_t remote_addr, 
+                                   uint64_t compare_add, uint64_t swap, uint64_t remote_addr,
                                    uct_rkey_t rkey, uct_rc_iface_send_desc_t *desc, int force_sig)
 {
     struct ibv_sge sge;
@@ -388,7 +421,7 @@ uct_dc_verbs_ep_ext_atomic(uct_dc_verbs_ep_t *ep, int opcode, void *result,
     UCT_DC_CHECK_RES(&iface->super, &ep->super);
     UCT_RC_IFACE_GET_TX_ATOMIC_DESC(&iface->super.super, &iface->verbs_common.short_desc_mp, desc,
                                     handler, result, comp);
-    uct_dc_verbs_iface_ext_atomic_post(iface, ep, opcode, length, compare_mask, 
+    uct_dc_verbs_iface_ext_atomic_post(iface, ep, opcode, length, compare_mask,
                                        compare_add, swap, remote_addr,
                                        rkey, desc, IBV_SEND_SIGNALED);
     return UCS_INPROGRESS;
@@ -531,7 +564,7 @@ ucs_status_t uct_dc_verbs_ep_flush(uct_ep_h tl_ep, unsigned flags, uct_completio
 }
 
 static UCS_F_ALWAYS_INLINE void
-uct_dc_verbs_poll_tx(uct_dc_verbs_iface_t *iface) 
+uct_dc_verbs_poll_tx(uct_dc_verbs_iface_t *iface)
 {
     int i;
     ucs_status_t status;
@@ -542,8 +575,8 @@ uct_dc_verbs_poll_tx(uct_dc_verbs_iface_t *iface)
 
     UCT_RC_VERBS_IFACE_FOREACH_TXWQE(&iface->super.super, i, wc, num_wcs) {
         if (ucs_unlikely(wc[i].status != IBV_WC_SUCCESS)) {
-            ucs_fatal("iface=%p: send completion %d with error: %s wqe: %p wr_id: %llu", 
-                      iface, i, ibv_wc_status_str(wc[i].status), 
+            ucs_fatal("iface=%p: send completion %d with error: %s wqe: %p wr_id: %llu",
+                      iface, i, ibv_wc_status_str(wc[i].status),
                       &wc[i], (unsigned long long)wc[i].wr_id);
         }
         count = uct_rc_verbs_txcq_get_comp_count(&wc[i]);
@@ -583,7 +616,7 @@ static uct_rc_iface_ops_t uct_dc_verbs_iface_ops = {
             .iface_query              = uct_dc_verbs_iface_query,
             .iface_get_device_address = uct_ib_iface_get_device_address,
             .iface_is_reachable       = uct_ib_iface_is_reachable,
-            .iface_release_am_desc    = uct_ib_iface_release_am_desc, 
+            .iface_release_am_desc    = uct_ib_iface_release_am_desc,
             .iface_get_address        = uct_dc_iface_get_address,
 
             .iface_flush              = uct_dc_iface_flush,
@@ -625,68 +658,75 @@ static uct_rc_iface_ops_t uct_dc_verbs_iface_ops = {
 
 void uct_dc_verbs_iface_init_wrs(uct_dc_verbs_iface_t *self)
 {
-    
+
     /* Initialize inline work request */
     memset(&self->inl_am_wr, 0, sizeof(self->inl_am_wr));
     self->inl_am_wr.sg_list                 = self->verbs_common.inl_sge;
     self->inl_am_wr.num_sge                 = 2;
     self->inl_am_wr.exp_opcode              = IBV_WR_SEND;
     self->inl_am_wr.exp_send_flags          = IBV_SEND_INLINE;
-    self->inl_am_wr.dc.dct_access_key       = UCT_IB_DC_KEY;
+    self->inl_am_wr.dc.dct_access_key       = UCT_IB_KEY;
 
     memset(&self->inl_rwrite_wr, 0, sizeof(self->inl_rwrite_wr));
     self->inl_rwrite_wr.sg_list             = self->verbs_common.inl_sge;
     self->inl_rwrite_wr.num_sge             = 1;
     self->inl_rwrite_wr.exp_opcode          = IBV_WR_RDMA_WRITE;
     self->inl_rwrite_wr.exp_send_flags      = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
-    self->inl_rwrite_wr.dc.dct_access_key   = UCT_IB_DC_KEY;
+    self->inl_rwrite_wr.dc.dct_access_key   = UCT_IB_KEY;
 }
 
 static UCS_CLASS_INIT_FUNC(uct_dc_verbs_iface_t, uct_md_h md, uct_worker_h worker,
-                           const char *dev_name, size_t rx_headroom,
+                           const uct_iface_params_t *params,
                            const uct_iface_config_t *tl_config)
 {
-    int i;
+    uct_dc_verbs_iface_config_t *config = ucs_derived_of(tl_config,
+                                                         uct_dc_verbs_iface_config_t);
+    struct ibv_qp_init_attr dci_init_attr;
+    struct ibv_qp_attr dci_attr;
     ucs_status_t status;
-    uct_dc_iface_config_t *config = ucs_derived_of(tl_config,
-                                                   uct_dc_iface_config_t);
+    int i, ret;
+
     ucs_trace_func("");
     UCS_CLASS_CALL_SUPER_INIT(uct_dc_iface_t, &uct_dc_verbs_iface_ops, md,
-                              worker, dev_name, rx_headroom, 0, config);
-
-    self->verbs_common.config.max_inline = config->max_inline;
-
-    status = uct_rc_verbs_iface_common_init(&self->verbs_common, &self->super.super, &config->super);
-    if (status != UCS_OK) {
-        return status;
-    }
+                              worker, params, 0, &config->super);
 
     uct_dc_verbs_iface_init_wrs(self);
 
-    status = uct_rc_verbs_iface_prepost_recvs_common(&self->super.super);
+    status = uct_rc_verbs_iface_common_init(&self->verbs_common, &self->super.super,
+                                            &config->verbs_common, &config->super.super);
     if (status != UCS_OK) {
-        goto out;
+        goto err;
     }
 
-    self->dcis_txcnt = ucs_malloc(self->super.tx.ndci * sizeof(uct_rc_verbs_txcnt_t), "dc");
-    if (self->dcis_txcnt == NULL) {
-        status = UCS_ERR_NO_MEMORY;
-        goto out;
+    ret = ibv_query_qp(self->super.tx.dcis[0].txqp.qp, &dci_attr, 0,
+                       &dci_init_attr);
+    if (ret) {
+        ucs_error("ibv_query_qp() failed: %m");
+        goto err_common_cleanup;
     }
+
+    self->verbs_common.config.max_inline = dci_init_attr.cap.max_inline_data;
 
     for (i = 0; i < self->super.tx.ndci; i++) {
         uct_rc_verbs_txcnt_init(&self->dcis_txcnt[i]);
-        uct_rc_txqp_available_set(&self->super.tx.dcis[i].txqp, self->super.super.config.tx_qp_len);
+        uct_rc_txqp_available_set(&self->super.tx.dcis[i].txqp,
+                                  self->super.super.config.tx_qp_len);
     }
-    
-    /**
-     * TODO: only register progress when we have a connection
-     */
+    uct_dc_iface_set_quota(&self->super, &config->super);
+
+    status = uct_rc_verbs_iface_prepost_recvs_common(&self->super.super);
+    if (status != UCS_OK) {
+        goto err_common_cleanup;
+    }
+
+    /* TODO: only register progress when we have a connection */
     uct_worker_progress_register(worker, uct_dc_verbs_iface_progress, self);
-    ucs_debug("created iface %p", self);
+    ucs_debug("created dc iface %p", self);
     return UCS_OK;
-out:
+
+err_common_cleanup:
     uct_rc_verbs_iface_common_cleanup(&self->verbs_common);
+err:
     return status;
 }
 
@@ -695,14 +735,13 @@ static UCS_CLASS_CLEANUP_FUNC(uct_dc_verbs_iface_t)
     ucs_trace_func("");
     uct_worker_progress_unregister(self->super.super.super.super.worker,
                                    uct_dc_verbs_iface_progress, self);
-    ucs_free(self->dcis_txcnt);
     uct_rc_verbs_iface_common_cleanup(&self->verbs_common);
 }
 
 UCS_CLASS_DEFINE(uct_dc_verbs_iface_t, uct_dc_iface_t);
 
 static UCS_CLASS_DEFINE_NEW_FUNC(uct_dc_verbs_iface_t, uct_iface_t, uct_md_h,
-                                 uct_worker_h, const char*, size_t,
+                                 uct_worker_h, const uct_iface_params_t*,
                                  const uct_iface_config_t*);
 
 static UCS_CLASS_DEFINE_DELETE_FUNC(uct_dc_verbs_iface_t, uct_iface_t);
@@ -725,7 +764,7 @@ UCT_TL_COMPONENT_DEFINE(uct_dc_verbs_tl,
                         uct_dc_verbs_iface_t,
                         "dc",
                         "DC_VERBS_",
-                        uct_dc_iface_config_table,
-                        uct_dc_iface_config_t);
+                        uct_dc_verbs_iface_config_table,
+                        uct_dc_verbs_iface_config_t);
 UCT_MD_REGISTER_TL(&uct_ib_mdc, &uct_dc_verbs_tl);
 

@@ -907,14 +907,20 @@ static ucs_status_t uct_perf_setup(ucx_perf_context_t *perf, ucx_perf_params_t *
 {
     uct_iface_config_t *iface_config;
     ucs_status_t status;
+    uct_iface_params_t iface_params = {
+        .tl_name     = params->uct.tl_name,
+        .dev_name    = params->uct.dev_name,
+        .rx_headroom = 0
+    };
 
     status = ucs_async_context_init(&perf->uct.async, params->async_mode);
     if (status != UCS_OK) {
         goto out;
     }
 
-    status = uct_worker_create(&perf->uct.async, params->thread_mode,
-                               &perf->uct.worker);
+    ucs_worker_param_t worker_params;
+    status = uct_worker_create(&perf->uct.async, &worker_params, 
+                               params->thread_mode, &perf->uct.worker);
     if (status != UCS_OK) {
         goto out_cleanup_async;
     }
@@ -929,8 +935,8 @@ static ucs_status_t uct_perf_setup(ucx_perf_context_t *perf, ucx_perf_params_t *
         goto out_destroy_md;
     }
 
-    status = uct_iface_open(perf->uct.md, perf->uct.worker, params->uct.tl_name,
-                            params->uct.dev_name, 0, iface_config, &perf->uct.iface);
+    status = uct_iface_open(perf->uct.md, perf->uct.worker, &iface_params,
+                            iface_config, &perf->uct.iface);
     uct_config_release(iface_config);
     if (status != UCS_OK) {
         ucs_error("Failed to open iface: %s", ucs_status_string(status));
@@ -1006,9 +1012,10 @@ static ucs_status_t ucp_perf_setup(ucx_perf_context_t *perf, ucx_perf_params_t *
     if (status != UCS_OK) {
         goto err;
     }
-
-    status = ucp_worker_create(perf->ucp.context, params->thread_mode,
-                               &perf->ucp.worker);
+    
+    ucs_worker_param_t worker_params;
+    status = ucp_worker_create(perf->ucp.context, &worker_params, 
+                               params->thread_mode, &perf->ucp.worker);
     if (status != UCS_OK) {
         goto err_cleanup;
     }

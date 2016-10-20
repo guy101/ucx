@@ -16,6 +16,7 @@
 #include <ucs/datastruct/mpool.inl>
 
 #define UCT_IB_DEVICE_NAME_LEN 256
+#define UCT_IB_MAX_IOV         8UL
 
 /* Forward declarations */
 typedef struct uct_ib_iface_config   uct_ib_iface_config_t;
@@ -57,6 +58,9 @@ struct uct_ib_iface_config {
         size_t              inl;             /* Inline space to reserve in CQ/QP */
         uct_iface_mpool_config_t mp;
     } rx;
+
+    /* Change the address type */
+    int                     addr_type;
 
     /* IB GID index to use  */
     unsigned                gid_index;
@@ -114,13 +118,15 @@ struct uct_ib_iface {
         uint8_t             port_num;
         uint8_t             sl;
         uint8_t             gid_index;
+        size_t              max_iov;             /* Maximum buffers in IOV array */
     } config;
 
     uct_ib_iface_ops_t      *ops;
 
 };
-UCS_CLASS_DECLARE(uct_ib_iface_t, uct_ib_iface_ops_t*, uct_md_h, uct_worker_h, const char*,
-                  unsigned, unsigned, unsigned, unsigned, size_t, uct_ib_iface_config_t*)
+UCS_CLASS_DECLARE(uct_ib_iface_t, uct_ib_iface_ops_t*, uct_md_h, uct_worker_h,
+                  const uct_iface_params_t*, unsigned, unsigned, unsigned,
+                  size_t, const uct_ib_iface_config_t*)
 
 
 /*
@@ -176,8 +182,8 @@ extern const char *uct_ib_mtu_values[];
  * Create memory pool of receive descriptors.
  */
 ucs_status_t uct_ib_iface_recv_mpool_init(uct_ib_iface_t *iface,
-                                            uct_ib_iface_config_t *config,
-                                            const char *name, ucs_mpool_t *mp);
+                                          const uct_ib_iface_config_t *config,
+                                          const char *name, ucs_mpool_t *mp);
 
 void uct_ib_iface_release_am_desc(uct_iface_t *tl_iface, void *desc);
 
@@ -249,8 +255,9 @@ void uct_ib_iface_fill_ah_attr(uct_ib_iface_t *iface, const uct_ib_address_t *ib
 
 ucs_status_t uct_ib_iface_create_ah(uct_ib_iface_t *iface,
                                     const uct_ib_address_t *ib_addr,
-                                    uint8_t src_path_bits,
-                                    struct ibv_ah **ah_p);
+                                    uint8_t path_bits,
+                                    struct ibv_ah **ah_p,
+                                    int *is_global_p);
 
 ucs_status_t uct_ib_iface_wakeup_open(uct_iface_h iface, unsigned events,
                                       uct_wakeup_h wakeup);
@@ -294,7 +301,7 @@ static inline uint8_t uct_ib_iface_umr_id(uct_ib_iface_t *iface)
         VALGRIND_MAKE_MEM_DEFINED(_hdr, _wc[i].byte_len); \
         UCS_INSTRUMENT_RECORD(UCS_INSTRUMENT_TYPE_IB_RX, __FUNCTION__, \
                               _wc[i].wr_id, _wc[i].status); \
-               1; }); ++_i) 
+               1; }); ++_i)
 
 #define UCT_IB_IFACE_VERBS_FOREACH_TXWQE(_iface, _i, _wc, _wc_count) \
     for (_i = 0; _i < _wc_count && ({ \
@@ -303,6 +310,52 @@ static inline uint8_t uct_ib_iface_umr_id(uct_ib_iface_t *iface)
                       _iface, _i, ibv_wc_status_str(_wc[i].status), \
                       &_wc[i], (unsigned long long)_wc[i].wr_id); \
         } \
-               1; }); ++_i) 
+               1; }); ++_i)
+
+/**
+ * Fill ibv_sge data structure by data provided in uct_iov_t
+ * The function avoids copying IOVs with zero length
+ *
+ * @return Number of elements in sge[]
+ */
+static UCS_F_ALWAYS_INLINE
+size_t uct_ib_verbs_sge_fill_iov(struct ibv_sge *sge, const uct_iov_t *iov,
+                                 size_t iovcnt)
+{
+    size_t iov_it, sge_it = 0;
+
+    for (iov_it = 0; iov_it < iovcnt; ++iov_it) {
+        sge[sge_it].length = uct_iov_get_length(&iov[iov_it]);
+        if (sge[sge_it].length > 0) {
+            sge[sge_it].addr   = (uintptr_t)(iov[iov_it].buffer);
+        } else {
+            continue; /* to avoid zero length elements in sge */
+        }
+
+        if (iov[sge_it].memh == UCT_INVALID_MEM_HANDLE) {
+            sge[sge_it].lkey = 0;
+        } else {
+            sge[sge_it].lkey = ((uct_ib_mem_t *)(iov[iov_it].memh))->lkey;
+        }
+        ++sge_it;
+    }
+
+    return sge_it;
+}
+
+
+static UCS_F_ALWAYS_INLINE
+size_t uct_ib_iface_get_max_iov(uct_ib_iface_t *iface)
+{
+    return iface->config.max_iov;
+}
+
+
+static UCS_F_ALWAYS_INLINE
+void uct_ib_iface_set_max_iov(uct_ib_iface_t *iface, size_t max_iov)
+{
+    iface->config.max_iov = ucs_min(UCT_IB_MAX_IOV, max_iov);
+}
+
 
 #endif
